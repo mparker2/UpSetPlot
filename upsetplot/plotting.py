@@ -1,6 +1,8 @@
 from __future__ import print_function, division, absolute_import
 
 import itertools
+from functools import reduce
+from collections import OrderedDict
 
 import numpy as np
 import pandas as pd
@@ -8,8 +10,12 @@ import matplotlib
 from matplotlib import pyplot as plt
 from matplotlib.tight_layout import get_renderer
 
+from .data import from_sets
 
-def _process_data(data, sort_by, sort_sets_by):
+
+def _process_data(data, sort_by, sort_sets_by,
+                  bootstrap_exp, global_set_size,
+                  ci, nboot, discard_empty):
     # check all indices are vertical
     assert all(set([True, False]) >= set(level) for level in data.index.levels)
     if not data.index.is_unique:
@@ -23,10 +29,31 @@ def _process_data(data, sort_by, sort_sets_by):
         # FIXME: can get IndexingError if level only contains False
         totals.append(data.loc[idxslice].sum())
     totals = pd.Series(totals, index=data.index.names)
+    data, totals = _order_data(data, totals, sort_by, sort_sets_by)
+    if discard_empty:
+        data = data[data.astype(bool)]
+
+    if bootstrap_exp:
+        if global_set_size is None:
+            global_set_size = np.nansum(data.values)
+        exp_med, exp_err = _bootstrap_expected(
+            totals, global_set_size, ci, nboot)
+        exp_med = exp_med[data.index]
+        exp_err = exp_err[data.index]
+    else:
+        exp_med, exp_err = None, None
+
+    return data, totals, exp_med, exp_err
+
+
+def _order_data(data, totals, sort_by, sort_sets_by):
+    
     if sort_sets_by == 'cardinality':
         totals.sort_values(ascending=False, inplace=True)
+
     elif sort_sets_by is not None:
         raise ValueError('Unknown sort_sets_by: %r' % sort_sets_by)
+
     data = data.reorder_levels(totals.index.values)
 
     if sort_by == 'cardinality':
@@ -44,12 +71,39 @@ def _process_data(data, sort_by, sort_sets_by):
         data = data.loc[o.index]
     else:
         raise ValueError('Unknown sort_by: %r' % sort_by)
-
-    min_value = 0
-    max_value = np.inf
-    data = data[np.logical_and(data >= min_value, data <= max_value)]
-
     return data, totals
+
+
+def _set_intersections(sets):
+    for i in range(1, len(sets) + 1):
+        yield from itertools.combinations(sets, i)
+
+
+def _confidence_interval(a, which=95):
+    p = 50 - which / 2, 50 + which / 2
+    l, u = np.percentile(a, p)
+    return np.median(a) - l, u - np.median(a)
+
+
+def _bootstrap_expected(totals, global_set_size, ci, nboot):
+    global_set = np.arange(global_set_size)
+    intersections = list(_set_intersections(totals.index.values))
+    exp_overlaps = []
+    for _ in range(nboot):
+        sampled_sets = OrderedDict()
+        for set_name, set_size in totals.iteritems():
+            sampled_sets[set_name] = set(np.random.choice(
+                global_set, size=set_size, replace=False))
+        sampled_sets['global'] = set(global_set)
+        agg = from_sets(sampled_sets)
+        agg = agg.groupby(agg.index.names[:-1]).sum()
+        exp_overlaps.append(agg)
+
+    ci_func = np.std if ci == 'std' else lambda x: _confidence_interval(x, ci)
+    exp_overlaps = pd.concat(exp_overlaps, axis=1)
+    exp_med = exp_overlaps.median(axis=1)
+    exp_err = exp_overlaps.apply(ci_func, axis=1, raw=True)
+    return exp_med, exp_err      
 
 
 class _Transposed:
@@ -81,6 +135,8 @@ class _Transposed:
         'vlines': 'hlines',
         'bar': 'barh',
         'barh': 'bar',
+        'yerr': 'xerr',
+        'xerr': 'yerr',
         'xaxis': 'yaxis',
         'yaxis': 'xaxis',
         'left': 'bottom',
@@ -117,6 +173,13 @@ class UpSet:
         Values for each set to plot.
         Should have multi-index where each level is binary,
         corresponding to set membership.
+    bootstrap_expected: bool
+        Whether to plot expected intersection size bars using global
+        set size parameter (Default False).
+    global_set_size : int or None
+        Size of whole population sets are drawn from. If None,
+        all examples are assumed to be present in union of sets.
+        Only required for computing expected bootstraps.
     orientation : {'horizontal' (default), 'vertical'}
         If horizontal, intersections are listed from left to right.
     sort_by : {'cardinality', 'degree'}
@@ -142,11 +205,15 @@ class UpSet:
         elements.
     """
 
-    def __init__(self, data, orientation='horizontal', sort_by='degree',
-                 sort_sets_by='cardinality', facecolor='black',
-                 with_lines=True, element_size=32,
+    def __init__(self, data, bootstrap_expected=False,
+                 global_set_size=None, ci=95, n_boot=100,
+                 orientation='horizontal', sort_by='degree',
+                 sort_sets_by='cardinality', discard_empty=False,
+                 facecolor='black', with_lines=True, element_size=32,
                  intersection_plot_elements=6, totals_plot_elements=2):
 
+        self._bootstrap_expected = bootstrap_expected
+        self._err_type = 'std' if ci == 'std' else 'ci'
         self._horizontal = orientation == 'horizontal'
         self._reorient = _identity if self._horizontal else _transpose
         self._facecolor = facecolor
@@ -155,12 +222,19 @@ class UpSet:
         self._totals_plot_elements = totals_plot_elements
         self._intersection_plot_elements = intersection_plot_elements
 
-        (self.intersections,
-         self.totals) = _process_data(data,
-                                      sort_by=sort_by,
-                                      sort_sets_by=sort_sets_by)
+        (self.intersections, self.totals, self.exp_med,
+         self.exp_err) = _process_data(data,
+                                       sort_by=sort_by,
+                                       sort_sets_by=sort_sets_by,
+                                       bootstrap_exp=bootstrap_expected,
+                                       global_set_size=global_set_size,
+                                       ci=ci, nboot=n_boot,
+                                       discard_empty=discard_empty)
         if not self._horizontal:
             self.intersections = self.intersections[::-1]
+            if bootstrap_expected:
+                self.exp_med = self.exp_med[::-1]
+                self.exp_err = self.exp_err[::-1]
 
     def _swapaxes(self, x, y):
         if self._horizontal:
@@ -261,9 +335,24 @@ class UpSet:
     def plot_intersections(self, ax):
         """Plot bars indicating intersection size
         """
+        
         ax = self._reorient(ax)
-        ax.bar(np.arange(len(self.intersections)), self.intersections,
-               .5, color=self._facecolor, zorder=10, align='center')
+        width = 0.25 if self._bootstrap_expected else 0.5
+        x = np.arange(len(self.intersections))
+        obs_x = x - 0.125 if self._bootstrap_expected else x
+        exp_x = x + 0.125
+        if self.exp_err is not None:
+            if self._err_type == 'std':
+                exp_err = self.exp_err.values
+            else:
+                exp_err = np.array(self.exp_err.values.tolist()).T
+        ax.bar(obs_x, self.intersections,
+               width, color=self._facecolor, zorder=10, align='center')
+        if self._bootstrap_expected:
+            ax.bar(exp_x, self.exp_med, width,
+                   color='lightgrey',
+                   align='center',
+                   **{self._reorient('yerr'): exp_err})
         ax.xaxis.set_visible(False)
         for x in ['top', 'bottom', 'right']:
             ax.spines[self._reorient(x)].set_visible(False)
