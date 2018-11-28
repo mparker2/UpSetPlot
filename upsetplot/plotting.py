@@ -347,12 +347,16 @@ class UpSet:
             else:
                 exp_err = np.array(self.exp_err.values.tolist()).T
         ax.bar(obs_x, self.intersections,
-               width, color=self._facecolor, zorder=10, align='center')
+               width, color=self._facecolor,
+               zorder=10, align='center',
+               label='Obs')
         if self._bootstrap_expected:
             ax.bar(exp_x, self.exp_med, width,
                    color='lightgrey',
                    align='center',
+                   label='Exp',
                    **{self._reorient('yerr'): exp_err})
+            ax.legend(loc=0)
         ax.xaxis.set_visible(False)
         for x in ['top', 'bottom', 'right']:
             ax.spines[self._reorient(x)].set_visible(False)
