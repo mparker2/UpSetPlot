@@ -15,7 +15,8 @@ from .data import from_sets
 
 def _process_data(data, sort_by, sort_sets_by,
                   bootstrap_exp, global_set_size,
-                  ci, nboot, discard_empty):
+                  ci, nboot, discard_empty,
+                  discard_union_difference):
     # check all indices are vertical
     assert all(set([True, False]) >= set(level) for level in data.index.levels)
     if not data.index.is_unique:
@@ -30,6 +31,8 @@ def _process_data(data, sort_by, sort_sets_by,
         totals.append(data.loc[idxslice].sum())
     totals = pd.Series(totals, index=data.index.names)
     data, totals = _order_data(data, totals, sort_by, sort_sets_by)
+    if discard_union_difference:
+        data = data[[any(x) for x in data.index.values]]
     if discard_empty:
         data = data[data.astype(bool)]
 
@@ -208,8 +211,10 @@ class UpSet:
     def __init__(self, data, bootstrap_expected=False,
                  global_set_size=None, ci=95, n_boot=100,
                  orientation='horizontal', sort_by='degree',
-                 sort_sets_by='cardinality', discard_empty=False,
-                 facecolor='black', with_lines=True, element_size=32,
+                 sort_sets_by='cardinality',
+                 discard_empty=False, discard_union_difference=True,
+                 facecolor='black', exp_facecolor='lightgrey',
+                 with_lines=True, element_size=32,
                  intersection_plot_elements=6, totals_plot_elements=2):
 
         self._bootstrap_expected = bootstrap_expected
@@ -217,19 +222,23 @@ class UpSet:
         self._horizontal = orientation == 'horizontal'
         self._reorient = _identity if self._horizontal else _transpose
         self._facecolor = facecolor
+        self._exp_facecolor = exp_facecolor
         self._with_lines = with_lines
         self._element_size = element_size
         self._totals_plot_elements = totals_plot_elements
         self._intersection_plot_elements = intersection_plot_elements
 
-        (self.intersections, self.totals, self.exp_med,
-         self.exp_err) = _process_data(data,
-                                       sort_by=sort_by,
-                                       sort_sets_by=sort_sets_by,
-                                       bootstrap_exp=bootstrap_expected,
-                                       global_set_size=global_set_size,
-                                       ci=ci, nboot=n_boot,
-                                       discard_empty=discard_empty)
+        (self.intersections, self.totals,
+         self.exp_med, self.exp_err) = _process_data(
+            data,
+            sort_by=sort_by,
+            sort_sets_by=sort_sets_by,
+            bootstrap_exp=bootstrap_expected,
+            global_set_size=global_set_size,
+            ci=ci, nboot=n_boot,
+            discard_empty=discard_empty,
+            discard_union_difference=discard_union_difference
+        )
         if not self._horizontal:
             self.intersections = self.intersections[::-1]
             if bootstrap_expected:
@@ -337,10 +346,10 @@ class UpSet:
         """
         
         ax = self._reorient(ax)
-        width = 0.25 if self._bootstrap_expected else 0.5
+        width = 0.3 if self._bootstrap_expected else 0.5
         x = np.arange(len(self.intersections))
-        obs_x = x - 0.125 if self._bootstrap_expected else x
-        exp_x = x + 0.125
+        obs_x = x - 0.15 if self._bootstrap_expected else x
+        exp_x = x + 0.15
         if self.exp_err is not None:
             if self._err_type == 'std':
                 exp_err = self.exp_err.values
@@ -352,7 +361,7 @@ class UpSet:
                label='Obs')
         if self._bootstrap_expected:
             ax.bar(exp_x, self.exp_med, width,
-                   color='lightgrey',
+                   color=self._exp_facecolor,
                    align='center',
                    label='Exp',
                    **{self._reorient('yerr'): exp_err})
